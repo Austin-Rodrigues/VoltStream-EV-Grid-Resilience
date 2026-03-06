@@ -1,17 +1,46 @@
 import requests
 from utils.logging_utils import logger
-from utils.constants import OCM_BASE_URL, MAX_RESULTS
+from utils.constants import OCM_BASE_URL, MAX_RESULTS, DEFAULT_MODIFIED_SINCE
+from utils.delta_utils import read_delta_table
 import time
+from pyspark.sql.functions import max
 
-def fetch_ocm_stations(country_code, dbutils):
+def fetch_ocm_stations(country_code, dbutils, table_path):
   all_stations = []
   ocm_api_key = dbutils.secrets.get(scope="VoltStream", key="ocm_api_key")
-  offset = 0
-  param = {'offset': offset, 'maxresults': MAX_RESULTS}
-  logger.info(f"Starting API call for {country_code}")
+  modified_since = DEFAULT_MODIFIED_SINCE
+
+  data = read_delta_table(table_path)
+  if data is None:
+    param = {
+      'modifiedsince': DEFAULT_MODIFIED_SINCE,
+      'sortby': 'modified_asc',
+      'maxresults': MAX_RESULTS,  
+      'countrycode': country_code,
+      'output': 'json',
+      'key': ocm_api_key
+    }
+    logger.info(f"Starting API call for {country_code} for full load ingestion")
+  else:
+    last_status = data.orderBy("start_time", ascending=False).first()["status"]
+
+    if last_status == "success":
+      last_date = data.agg(max("last_run_timestamp")).collect()[0][0]
+    else:
+      last_date = DEFAULT_MODIFIED_SINCE
+
+    param = {
+        'modifiedsince': last_date,
+        'sortby': 'modified_asc',
+        'maxresults': MAX_RESULTS,  
+        'countrycode': country_code,
+        'output': 'json',
+        'key': ocm_api_key
+      }
+    logger.info(f"Starting API call for {country_code} for incremental load ingestion from {last_date}")
   while True:
     try:
-      response = requests.get(f'{OCM_BASE_URL}/poi/?output=json&countrycode={country_code}&key={ocm_api_key}', params = param, timeout = 15)
+      response = requests.get(f'{OCM_BASE_URL}/poi/', params = param, timeout = 15)
       
       if response.status_code == 429:
         logger.warning(f"Rate limited. waiting 30 seconds before retry..")
@@ -25,10 +54,10 @@ def fetch_ocm_stations(country_code, dbutils):
       if len(page_data) < MAX_RESULTS:
         logger.info(f"Pagination complete. Total records: {len(all_stations)}")
         break
-
-      logger.info(f"Fetched {len(all_stations)} records for offset {offset}")
-      offset += MAX_RESULTS
-      param['offset'] = offset
+      
+      modified_since = page_data[-1]['DateLastStatusUpdate']
+      param['modifiedsince'] = modified_since
+      logger.info(f"Fetched {len(all_stations)} records, modifiedsince updated to {modified_since}")
       time.sleep(1)
       
   

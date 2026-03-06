@@ -15,5 +15,20 @@ def write_delta_table(data: DataFrame, table_path: str, mode: str):
 
     except AnalysisException as analysis_err:
         logger.error(f" Analysis error occured {analysis_err}")
+        raise
     except Exception as err:
         logger.error(f" Error occured {err}")
+        raise
+
+def read_delta_table(table_path: str):
+    try:
+        logger.info(f"Reading data from {table_path}")
+        data = spark.read.format("delta").table(table_path)
+        logger.info(f"Successfully read table {table_path}")
+        return data
+    except AnalysisException as analysis_err:
+        logger.error(f" Analysis error occured {analysis_err}")
+        return None
+    except Exception as err:
+        logger.error(f" Error occured {err}")
+        return None
