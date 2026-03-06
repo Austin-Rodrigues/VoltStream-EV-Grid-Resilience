@@ -1,6 +1,7 @@
 from utils.logging_utils import logger
 from pyspark.sql import DataFrame 
 from pyspark.sql.utils import AnalysisException
+from databricks.sdk.runtime import spark
 
 def write_delta_table(data: DataFrame, table_path: str, mode: str):
     try:

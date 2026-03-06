@@ -3,7 +3,7 @@ from utils.logging_utils import logger
 from utils.constants import OCM_BASE_URL, MAX_RESULTS, DEFAULT_MODIFIED_SINCE
 from utils.delta_utils import read_delta_table
 import time
-from pyspark.sql.functions import max
+from pyspark.sql.functions import max, col
 
 def fetch_ocm_stations(country_code, dbutils, table_path):
   all_stations = []
@@ -25,7 +25,9 @@ def fetch_ocm_stations(country_code, dbutils, table_path):
     last_status = data.orderBy("start_time", ascending=False).first()["status"]
 
     if last_status == "success":
-      last_date = data.agg(max("last_run_timestamp")).collect()[0][0]
+      last_date = data.filter(col("status") == "success") \
+               .orderBy("start_time", ascending=False) \
+               .first()["last_run_timestamp"]
     else:
       last_date = DEFAULT_MODIFIED_SINCE
 
