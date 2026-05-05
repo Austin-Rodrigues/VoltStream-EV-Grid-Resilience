@@ -1,0 +1,161 @@
+# Technical Progress Report: Silver Layer & Pipeline Completion
+**Project Title:** Real-Time Analytics & Predictive Modeling for VoltStream Energy Solutions
+**Reporting Period:** April 16 - May 1, 2026
+**Phase:** Silver Layer Transformation & Quality Enforcement
+
+---
+
+## 1. Executive Summary
+
+This reporting period covers the completion of the Silver layer transformation pipeline for Project VoltStream. Building on the Bronze ingestion work from the first two weeks, I flattened deeply nested JSON structures from both the Open Charge Map and OpenWeatherMap APIs, standardized all timestamps to UTC, and built a deduplication system using station UUIDs. The Silver layer now holds clean, queryable tables ready for Gold-layer business logic. A key decision was made around Non-Operational station handling, where failure events are tracked rather than discarded, which will be important for the weather-to-station correlation analysis. Both Bronze and Silver layers are fully operational and version-controlled on GitHub.
+
+---
+
+## 2. Major Accomplishments
+
+### A. JSON Flattening - EV Station Records
+
+The Open Charge Map API returns EV station data with two heavily nested structures: `AddressInfo` (an object containing address, city, state, country, and coordinates) and `Connections` (an array of connector objects each containing type, level, and power specifications). The Silver layer extracts these into flat, queryable columns.
+
+**Transformation outcomes:**
+- `AddressInfo` fields extracted: `address_title`, `address_line1`, `town`, `state_or_province`, `postcode`, `country_iso`, `latitude`, `longitude`
+- `Connections` array exploded using PySpark `explode()`: one row per connector per station with `connector_type`, `level_type`, `power_kw`, `quantity`
+- UUID field promoted as the primary deduplication key: `station_id`
+- Resulting Silver table: `silver_ev_stations` (flat, indexed, and schema-enforced)
+
+### B. Deduplication Logic Implementation
+
+Multiple ingestion runs against the same API endpoint will produce duplicate records for unchanged stations. The Silver layer enforces a MERGE (upsert) pattern using the station UUID as the unique identifier.
+
+- `MERGE INTO silver_ev_stations ON station_id`: updates existing records when status changes, inserts new records only
+- Tested against simulated duplicate ingestion, zero duplicate rows confirmed post-merge
+- Status-change tracking preserved: a station moving from Operational to Non-Operational produces an updated row with the new status and timestamp, not a duplicate entry
+
+### C. Non-Operational Station Handling
+
+The Project Charter specifies a constraint: filter out Non-Operational stations *unless they were operational in the previous load*. This logic exists to track failure events, as stations that go offline represent Grid Strain incidents.
+
+**Implementation approach:**
+- Current load status compared against previous Silver layer status per `station_id`
+- Stations that are Non-Operational and were Non-Operational in the last load: excluded (no new event)
+- Stations that transition from Operational to Non-Operational: retained with `is_failure_event = true` flag
+- This allows the Gold layer to count distinct failure events rather than cumulative non-operational states
+
+### D. Weather Data Standardization
+
+Raw weather data from OpenWeatherMap arrived in metric units with Unix epoch timestamps. The Silver layer standardizes these for US-facing business reporting and clean temporal joining.
+
+- Temperature converted: Celsius to Fahrenheit `(F = C x 9/5 + 32)`
+- All timestamps converted from Unix epoch integers to UTC ISO-8601 strings
+- Weather severity classification added as a derived column: `Mild / Moderate / Severe` based on wind speed and precipitation thresholds, used as a prerequisite for Gold-layer Risk Score calculation
+- Resulting Silver table: `silver_weather_clean`
+
+### E. Schema Enforcement on Silver Tables
+
+Unlike Bronze tables (which accept any schema via `mergeSchema`), Silver tables now enforce a fixed schema. This ensures unexpected upstream API changes are caught at the Silver boundary rather than corrupting downstream analytics.
+
+- `enforceSchema = true` enabled on both `silver_ev_stations` and `silver_weather_clean`
+- Schema violations surface as explicit pipeline errors, triggering review rather than silent data corruption
+- Both Silver table schemas documented in README with column names, types, and source derivation
+
+---
+
+## 3. Technical Challenges Overcome
+
+### Challenge 1: Connections Array - Multi-Row Explosion
+
+**Problem:** EV stations frequently have multiple connector types (CCS, CHAdeMO, Level 2 J1772). The `Connections` field is an array of objects. A naive flatten would either truncate to the first connector or produce unparseable strings.
+
+**Solution:** Used PySpark's `explode()` function on the `Connections` array to produce one row per connector per station, then extracted individual fields from the resulting struct column. Station-level fields (address, status, coordinates) are repeated across connector rows, supporting both station-level and connector-level aggregations at the Gold layer.
+
+**Outcome:** Full connector inventory preserved with no data loss from multi-connector stations.
+
+### Challenge 2: Timestamp Semantics - Ingestion Date vs. Data Date
+
+**Problem:** There was a risk of conflating the `ingested_at` Bronze timestamp (when the pipeline ran) with the actual event timestamp from the API (when a station status was last updated). Weather correlation requires the actual event time, not the polling time.
+
+**Solution:** Verified the correct source field for each API: `DateLastStatusUpdate` from Open Charge Map and `dt` (Unix epoch) from OpenWeatherMap. Both are explicitly parsed and renamed to `event_timestamp_utc` in their respective Silver tables. `ingested_at` is preserved separately as an audit column. All Gold-layer and dashboard logic will use `event_timestamp_utc` for temporal analysis.
+
+**Lesson Learned:** Always verify data provenance and timestamp semantics before building on top of a field.
+
+---
+
+## 4. Infrastructure Status
+
+### Delta Lake - Full Medallion Status (Verified May 1)
+
+| Table | Layer | Contents | Status |
+|---|---|---|---|
+| `bronze_ev_stations` | Bronze | Raw EV station JSON | Active |
+| `bronze_weather_snapshots` | Bronze | Raw weather JSON | Active |
+| `silver_ev_stations` | Silver | Flattened, deduped, failure-flagged station records | Active |
+| `silver_weather_clean` | Silver | Standardized weather with severity classification | Active |
+| `gold_fact_station_status` | Gold | Fact table (Star Schema) | Upcoming |
+| `gold_dim_weather_condition` | Gold | Dimension table (Weather) | Upcoming |
+
+### Pipeline Health
+- All notebooks execute without errors
+- Zero duplicates in Silver tables (MERGE logic verified)
+- Schema enforcement active on Silver layer
+- `event_timestamp_utc` correctly sourced from API event fields, not ingestion time
+- Failure event flag (`is_failure_event`) populating correctly on status transitions
+
+---
+
+## 5. Milestone Tracker
+
+| Phase | Deliverable | Est. Hours | Status |
+|---|---|---|---|
+| 01 | API Ingestion & Bronze Layer | 4 Hours | Complete |
+| 02 | Silver Cleaning & Standardization | 5 Hours | Complete |
+| 03 | Gold Layer Enrichment | 4 Hours | In Progress |
+| 04 | Power BI ROI Dashboard | 3 Hours | Not Started |
+
+---
+
+## 6. Skills Demonstrated
+
+### Technical Skills
+- **PySpark Transformations:** `explode()`, struct field extraction, `withColumn()` for derived columns, MERGE/upsert patterns
+- **Delta Lake:** Schema enforcement, audit column design, upsert logic
+- **Data Modeling:** Medallion Architecture Bronze-to-Silver transition, failure event tracking design
+- **API Data Engineering:** Timestamp semantics, unit standardization, multi-source schema alignment
+
+### Professional Skills
+- **Attention to Detail:** Correctly distinguished ingestion timestamps from event timestamps, which has a direct impact on the accuracy of time-series analysis
+- **Business Alignment:** Non-Operational station logic designed to support Gold-layer failure event counting, not just data cleaning
+- **Documentation:** Silver schema documented in README with transformation decisions and rationale
+
+---
+
+## 7. Next Steps (May 2 - May 15)
+
+### Priority 1: Gold Layer - Weather-to-Station Join
+- Join `silver_weather_clean` to `silver_ev_stations` on rounded lat/lon (1 decimal precision for regional proximity)
+- Create derived `Risk_Score` column: composite of weather severity classification and station usage type weight
+- Build `gold_fact_station_status` and `gold_dim_weather_condition` for Star Schema serving layer
+
+### Priority 2: Power BI Dashboard
+- Connect Power BI Desktop to Databricks SQL Warehouse via Partner Connect
+- Build Revenue Loss Monitor KPI card: `Offline Stations x Avg. Charge Cost = Estimated Revenue at Risk`
+- Create Station Downtime vs. Temperature/Wind Speed trend chart for weather correlation
+- Build Maintenance Priority list: High-Risk stations filtered by forecasted weather severity
+- Implement Weather Severity slicer to filter map to high-risk zones only
+
+---
+
+## 8. Risk Assessment & Mitigation
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Lat/lon rounding (1 decimal) produces too-broad or too-narrow weather joins | Medium | Medium | Test join cardinality before Gold commit; adjust rounding precision if needed |
+| Power BI Databricks connector requires paid workspace tier | Low | High | Verified Free Edition supports SQL Warehouse + Partner Connect |
+| `Risk_Score` formula undefined in charter | Medium | Medium | Document formula assumptions and flag for Architect review before dashboard build |
+
+---
+
+## 9. Conclusion
+
+This reporting period covers the most technically involved phase of Project VoltStream so far. The Silver layer required deliberate engineering decisions around the Non-Operational station filter logic and the deduplication MERGE pattern, both of which directly support the business analysis goals in the Project Charter. The failure-event tracking approach sets up the Gold layer to answer VoltStream's core question: when does extreme weather cause station outages, and which stations are most at risk?
+
+With Bronze and Silver complete, work on the Gold layer and Power BI dashboard starts May 2.
